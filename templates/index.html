@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Satellite Telemetry & Kalman State Estimation HUD</title>
+    <!-- Fonts & Icons -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@300;400;600&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Chart.js & Three.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+</head>
+<body class="dark-theme">
+    <div class="hud-container">
+        <!-- Top Navigation / Telemetry Header -->
+        <header class="hud-header">
+            <div class="header-brand">
+                <div class="sat-icon-pulse">
+                    <span class="pulse-ring"></span>
+                    <span class="satellite-symbol">🛰️</span>
+                </div>
+                <div>
+                    <h1 class="hud-title">ORBITAL-EKF // STATE ESTIMATOR</h1>
+                    <p class="hud-subtitle">BMP280 • MPU6050 • LSM6DSM • RTC SENSOR FUSION</p>
+                </div>
+            </div>
+
+            <!-- Global Status Pills -->
+            <div class="header-stats">
+                <div class="stat-pill">
+                    <span class="pill-label">ORBIT STATUS</span>
+                    <span id="orbit-status-badge" class="badge-status status-waiting">WAITING DATA</span>
+                </div>
+                <div class="stat-pill">
+                    <span class="pill-label">STABILITY HEALTH</span>
+                    <div class="health-bar-container">
+                        <div id="stability-health-fill" class="health-bar-fill" style="width: 100%"></div>
+                    </div>
+                    <span id="stability-health-val" class="pill-val">--%</span>
+                </div>
+                <div class="stat-pill">
+                    <span class="pill-label">MISSION RTC</span>
+                    <span id="rtc-time-display" class="pill-val mono">--:--:-- UTC</span>
+                </div>
+                <div class="stat-pill">
+                    <span class="pill-label">STREAM MODE</span>
+                    <span id="sim-status-indicator" class="sim-pill off">OFFLINE</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Notification Banner / System Message -->
+        <div id="status-banner" class="status-banner banner-info">
+            <span class="banner-icon">ℹ️</span>
+            <span id="banner-text">Extended Kalman Filter initialized. Awaiting sensor telemetry packets or start the built-in simulator.</span>
+        </div>
+
+        <!-- Quick Simulation & Control Bar -->
+        <div class="control-strip">
+            <div class="control-group">
+                <label for="scenario-select">FLIGHT SCENARIO:</label>
+                <select id="scenario-select" class="hud-select">
+                    <option value="stable_orbit" selected>Stable LEO Orbit (~350 km)</option>
+                    <option value="orbital_decay">Orbital Decay VLEO (~135 km)</option>
+                    <option value="critical_reentry">Critical Re-entry & Tumble (<85 km)</option>
+                    <option value="suborbital_cansat">Suborbital CanSat Flight (2.5 km)</option>
+                </select>
+                <button id="btn-start-sim" class="btn btn-primary">▶ Start Live Stream</button>
+                <button id="btn-stop-sim" class="btn btn-warning" disabled>⏸ Pause Stream</button>
+                <button id="btn-step-sim" class="btn btn-secondary">⏭ Step 1x</button>
+                <button id="btn-reset" class="btn btn-danger">↺ Reset Filter</button>
+            </div>
+            <div class="control-actions">
+                <button id="btn-toggle-manual" class="btn btn-outline">📡 Inject Custom Packet</button>
+            </div>
+        </div>
+
+        <!-- Main Telemetry Grid -->
+        <main class="hud-grid">
+            <!-- Left Column: Primary Heading & Attitude Cards -->
+            <section class="grid-card heading-card">
+                <div class="card-header">
+                    <h2>ATTITUDE & HEADING ESTIMATION</h2>
+                    <span class="badge-filter">EKF (7-STATE)</span>
+                </div>
+                <div class="card-body">
+                    <!-- Heading Displays -->
+                    <div class="heading-metrics-row">
+                        <div class="metric-box highlight">
+                            <span class="metric-title">CURRENT HEADING</span>
+                            <div class="metric-number-wrap">
+                                <span id="current-heading-val" class="metric-large">0.00</span>
+                                <span class="metric-unit">°</span>
+                            </div>
+                            <span class="metric-sub" id="heading-cardinal">N</span>
+                        </div>
+                        <div class="metric-box prediction-highlight">
+                            <span class="metric-title">PREDICTED NEXT HEADING</span>
+                            <div class="metric-number-wrap">
+                                <span id="next-heading-val" class="metric-large text-cyan">0.00</span>
+                                <span class="metric-unit">°</span>
+                            </div>
+                            <span class="metric-sub" id="next-heading-delta">Δ 0.00°/s</span>
+                        </div>
+                    </div>
+
+                    <!-- Attitude Gauges: Compass & Horizon -->
+                    <div class="gauges-split">
+                        <div class="gauge-container">
+                            <div class="gauge-label">HEADING COMPASS</div>
+                            <canvas id="compass-canvas" width="160" height="160"></canvas>
+                        </div>
+                        <div class="gauge-container">
+                            <div class="gauge-label">ARTIFICIAL HORIZON</div>
+                            <canvas id="horizon-canvas" width="160" height="160"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Euler Angles & Rates Breakdown -->
+                    <div class="telemetry-table-mini">
+                        <div class="row"><span class="k">Roll (φ):</span><span class="v mono" id="roll-val">0.00°</span></div>
+                        <div class="row"><span class="k">Pitch (θ):</span><span class="v mono" id="pitch-val">0.00°</span></div>
+                        <div class="row"><span class="k">Yaw / Heading (ψ):</span><span class="v mono" id="yaw-val">0.00°</span></div>
+                        <div class="row"><span class="k">Yaw Rate (dψ/dt):</span><span class="v mono" id="yaw-rate-val">0.00°/s</span></div>
+                        <div class="row"><span class="k">3D Tumble Rate (|ω|):</span><span class="v mono" id="tumble-rate-val">0.00°/s</span></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Middle Column: Altitude, Orbit Decay & Predictor -->
+            <section class="grid-card orbit-card">
+                <div class="card-header">
+                    <h2>ORBITAL KINEMATICS & DECAY</h2>
+                    <span class="badge-filter">ALTITUDE KF</span>
+                </div>
+                <div class="card-body">
+                    <div class="orbit-metrics-row">
+                        <div class="metric-box">
+                            <span class="metric-title">ESTIMATED ALTITUDE</span>
+                            <div class="metric-number-wrap">
+                                <span id="altitude-val" class="metric-large">0.0</span>
+                                <span class="metric-unit" id="altitude-unit">km</span>
+                            </div>
+                            <span class="metric-sub" id="bmp-raw-alt">BMP280 Raw: -- km</span>
+                        </div>
+                        <div class="metric-box" id="decay-metric-box">
+                            <span class="metric-title">VERTICAL VELOCITY (dh/dt)</span>
+                            <div class="metric-number-wrap">
+                                <span id="decay-rate-val" class="metric-large">0.00</span>
+                                <span class="metric-unit">m/s</span>
+                            </div>
+                            <span class="metric-sub" id="decay-status-text">Stationary</span>
+                        </div>
+                    </div>
+
+                    <!-- Reentry & Decay Diagnostic Panel -->
+                    <div class="diagnostic-panel">
+                        <div class="diag-item">
+                            <span class="diag-label">IN ORBIT PREDICTION:</span>
+                            <span id="is-in-orbit-tag" class="diag-val tag-true">YES</span>
+                        </div>
+                        <div class="diag-item">
+                            <span class="diag-label">EST. TIME TO RE-ENTRY:</span>
+                            <span id="reentry-time-val" class="diag-val mono">STABLE (N/A)</span>
+                        </div>
+                        <div class="diag-item">
+                            <span class="diag-label">SPIN STABILITY:</span>
+                            <span id="spin-stability-val" class="diag-val">STABLE</span>
+                        </div>
+                        <div class="diag-item">
+                            <span class="diag-label">ESTIMATED DRAG ACCEL:</span>
+                            <span id="drag-val" class="diag-val mono">0.0000 m/s²</span>
+                        </div>
+                        <div class="diag-item">
+                            <span class="diag-label">AIR DENSITY (ρ):</span>
+                            <span id="density-val" class="diag-val mono">-- kg/m³</span>
+                        </div>
+                    </div>
+
+                    <!-- Projected Heading Horizons -->
+                    <div class="horizon-table">
+                        <div class="horizon-header">NEXT HEADING PROJECTION TIMELINE</div>
+                        <div class="horizon-chips" id="heading-chips">
+                            <div class="chip">+1s: <span class="mono">--°</span></div>
+                            <div class="chip">+2s: <span class="mono">--°</span></div>
+                            <div class="chip">+5s: <span class="mono">--°</span></div>
+                            <div class="chip">+10s: <span class="mono">--°</span></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Column: 3D Satellite Model & Sensor Readings -->
+            <section class="grid-card sat3d-card">
+                <div class="card-header">
+                    <h2>3D SATELLITE ORIENTATION</h2>
+                    <span class="badge-filter">QUATERNION [q₀, q₁, q₂, q₃]</span>
+                </div>
+                <div class="card-body">
+                    <!-- WebGL 3D Satellite Viewport -->
+                    <div id="three-container" class="three-viewport">
+                        <div class="viewport-overlay">
+                            <span class="overlay-axis red">X: Roll</span>
+                            <span class="overlay-axis green">Y: Pitch</span>
+                            <span class="overlay-axis blue">Z: Yaw/Nadir</span>
+                        </div>
+                    </div>
+                    
+                    <!-- Raw Sensor Subsystems Readout -->
+                    <div class="sensor-readouts">
+                        <div class="sensor-card">
+                            <span class="sensor-title">BMP280 BAROMETER</span>
+                            <div class="sensor-val"><span id="p-val">--</span> <span class="u">Pa</span> | <span id="t-val">--</span> <span class="u">°C</span></div>
+                        </div>
+                        <div class="sensor-card">
+                            <span class="sensor-title">MPU6050 ACCEL (m/s²)</span>
+                            <div class="sensor-val mono" id="accel-xyz">X: 0.00 Y: 0.00 Z: 0.00</div>
+                        </div>
+                        <div class="sensor-card">
+                            <span class="sensor-title">MPU6050 GYRO (°/s)</span>
+                            <div class="sensor-val mono" id="gyro-xyz">X: 0.00 Y: 0.00 Z: 0.00</div>
+                        </div>
+                        <div class="sensor-card">
+                            <span class="sensor-title">LSM6DSM MAG (μT)</span>
+                            <div class="sensor-val mono" id="mag-xyz">X: 0.00 Y: 0.00 Z: 0.00</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- Real-Time Kalman Charts -->
+        <section class="charts-section">
+            <div class="chart-container-card">
+                <div class="chart-title">ALTITUDE & DECAY TRAJECTORY</div>
+                <div class="chart-canvas-wrap">
+                    <canvas id="altitudeChart"></canvas>
+                </div>
+            </div>
+            <div class="chart-container-card">
+                <div class="chart-title">CURRENT HEADING VS PREDICTED NEXT HEADING</div>
+                <div class="chart-canvas-wrap">
+                    <canvas id="headingChart"></canvas>
+                </div>
+            </div>
+            <div class="chart-container-card">
+                <div class="chart-title">ANGULAR VELOCITY & GYRO BIAS</div>
+                <div class="chart-canvas-wrap">
+                    <canvas id="gyroChart"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <!-- Custom Telemetry Injection Modal / Drawer -->
+        <div id="injection-modal" class="modal hidden">
+            <div class="modal-dialog">
+                <div class="modal-header">
+                    <h3>CUSTOM TELEMETRY PACKET INJECTION</h3>
+                    <button id="btn-close-modal" class="modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <p class="modal-hint">Send a raw JSON telemetry packet to <code>POST /api/telemetry</code> to test your hardware sensors.</p>
+                    <textarea id="telemetry-json-input" class="json-editor" rows="12">
+{
+  "rtc_time": 1728245000.0,
+  "bmp280": {
+    "pressure_pa": 0.015,
+    "temperature_c": -20.5
+  },
+  "mpu6050": {
+    "accel_x": 0.01,
+    "accel_y": -0.02,
+    "accel_z": 0.05,
+    "gyro_x": 0.005,
+    "gyro_y": 0.002,
+    "gyro_z": 0.012
+  },
+  "lsm6dsm": {
+    "mag_x": 21.5,
+    "mag_y": -4.2,
+    "mag_z": 41.8
+  }
+}
+                    </textarea>
+                    <div class="preset-buttons">
+                        <span>Presets:</span>
+                        <button class="btn btn-xs preset-btn" data-preset="leo">Nominal LEO (350 km)</button>
+                        <button class="btn btn-xs preset-btn" data-preset="decay">Decaying Orbit (130 km)</button>
+                        <button class="btn btn-xs preset-btn" data-preset="reentry">Re-entering / Tumbling (75 km)</button>
+                        <button class="btn btn-xs preset-btn" data-preset="cansat">CanSat Drop (1.5 km)</button>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button id="btn-send-packet" class="btn btn-primary">Transmit Packet to Kalman Filter</button>
+                    <button id="btn-modal-cancel" class="btn btn-secondary">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Application Dashboard Logic -->
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+</html>
